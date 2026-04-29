@@ -22,7 +22,7 @@ class DownloaderApi(_PluginBase):
     # 插件图标
     plugin_icon = "sync_file.png"
     # 插件版本
-    plugin_version = "1.3.3"
+    plugin_version = "1.3.4"
     # 插件作者
     plugin_author = "yubanmeiqin9048"
     # 作者主页
@@ -39,6 +39,7 @@ class DownloaderApi(_PluginBase):
     # 下载器
     _downloader = None
     _save_path = None
+    _supported_downloaders = {"qbittorrent", "transmission"}
 
     def init_plugin(self, config: dict | None = None):
         self.downloader_helper = DownloaderHelper()
@@ -81,7 +82,7 @@ class DownloaderApi(_PluginBase):
         downloader_options = [
             {"title": config.name, "value": config.name}
             for config in self.downloader_helper.get_configs().values()
-            if config.type == "qbittorrent"
+            if config.type in self._supported_downloaders
         ]
         return [
             {
@@ -143,7 +144,7 @@ class DownloaderApi(_PluginBase):
                     },
                 ],
             },
-        ], {"enable": False, "save_path": ""}
+        ], {"enabled": False, "save_path": "", "downloader": ""}
 
     def stop_service(self):
         """
@@ -156,8 +157,93 @@ class DownloaderApi(_PluginBase):
             {
                 "enabled": self._enabled,
                 "save_path": self._save_path,
+                "downloader": self._downloader,
             }
         )
+
+    @staticmethod
+    def _get_torrent_hash(torrent: Any) -> str | None:
+        """
+        兼容QB/TR的种子hash字段
+        """
+        if torrent is None:
+            return None
+        return (
+            getattr(torrent, "hash", None)
+            or getattr(torrent, "hashString", None)
+            or getattr(torrent, "hash_string", None)
+        )
+
+    @staticmethod
+    def _get_torrent_size(torrent: Any) -> int:
+        """
+        兼容QB/TR的种子大小字段
+        """
+        if torrent is None:
+            return 0
+        size = (
+            getattr(torrent, "size", None)
+            or getattr(torrent, "total_size", None)
+            or getattr(torrent, "totalSize", None)
+        )
+        return int(size or 0)
+
+    async def _add_qbittorrent(self, torrent_url: str) -> tuple[str | None, int, str | None]:
+        """
+        通过QB添加种子并返回hash与大小
+        """
+        tag = StringUtils.generate_random_str(10)
+        state = await to_thread(
+            self.downloader.add_torrent,
+            content=torrent_url,
+            download_dir=self._save_path,
+            tag=tag,
+        )
+        if not state:
+            return None, 0, "种子添加下载失败"
+
+        torrent_hash = await to_thread(self.downloader.get_torrent_id_by_tag, tag)
+        if not torrent_hash:
+            return None, 0, "种子添加成功，但未能定位下载任务"
+
+        torrents, error = await to_thread(self.downloader.get_torrents, torrent_hash)
+        if error:
+            return torrent_hash, 0, "种子添加成功，但查询任务详情失败"
+
+        torrent = torrents[0] if torrents else None
+        return torrent_hash, self._get_torrent_size(torrent), None
+
+    async def _add_transmission(self, torrent_url: str) -> tuple[str | None, int, str | None]:
+        """
+        通过Transmission添加种子并返回hash与大小
+        """
+        label = StringUtils.generate_random_str(10)
+        torrent = await to_thread(
+            self.downloader.add_torrent,
+            content=torrent_url,
+            download_dir=self._save_path,
+            labels=[label],
+        )
+        if not torrent:
+            return None, 0, "种子添加下载失败"
+
+        torrent_hash = self._get_torrent_hash(torrent)
+        size = self._get_torrent_size(torrent)
+        if torrent_hash:
+            return torrent_hash, size, None
+
+        torrents, error = await to_thread(self.downloader.get_torrents, tags=label)
+        if error:
+            return None, 0, "种子添加成功，但查询下载任务失败"
+        if not torrents:
+            return None, 0, "种子添加成功，但未能定位下载任务"
+
+        torrent = torrents[0]
+        torrent_hash = self._get_torrent_hash(torrent)
+        if not torrent_hash:
+            return None, 0, "种子添加成功，但未能解析下载任务标识"
+
+        return torrent_hash, self._get_torrent_size(torrent), None
 
     async def download_torrent(self, torrent_url: str) -> schemas.Response:
         """
@@ -167,17 +253,13 @@ class DownloaderApi(_PluginBase):
             if not self.downloader:
                 return schemas.Response(success=False, message="未配置下载器")
             if isinstance(self.downloader, Transmission):
-                return schemas.Response(success=False, message="暂不支持TR下载器")
-            # 添加下载
-            tag = StringUtils.generate_random_str(10)
-            state = await to_thread(
-                self.downloader.add_torrent, content=torrent_url, download_dir=self._save_path, tag=tag
-            )
-            torrent_hash = await to_thread(self.downloader.get_torrent_id_by_tag, tag)
-            if not state:
-                return schemas.Response(success=False, message="种子添加下载失败")
-            torrents, error = await to_thread(self.downloader.get_torrents, torrent_hash)
-            size = torrents[0].size if not error else 0
+                torrent_hash, size, error_message = await self._add_transmission(torrent_url)
+            else:
+                torrent_hash, size, error_message = await self._add_qbittorrent(torrent_url)
+
+            if error_message:
+                return schemas.Response(success=False, message=error_message)
+
             self.eventmanager.send_event(
                 EventType.PluginAction,
                 {"action": "downloaderapi_add", "hash": torrent_hash, "size": size},
@@ -195,9 +277,12 @@ class DownloaderApi(_PluginBase):
             logger.warning("尚未配置下载器，请检查配置")
             return None
 
-        service = self.downloader_helper.get_service(name=self._downloader, type_filter="qbittorrent")
+        service = self.downloader_helper.get_service(name=self._downloader)
         if not service:
             logger.warning("获取下载器实例失败，请检查配置")
+            return None
+        if service.type not in self._supported_downloaders:
+            logger.warning(f"下载器 {self._downloader} 类型 {service.type} 暂不支持")
             return None
         if not service.instance:
             logger.warning("下载器实例为空，请检查配置")
