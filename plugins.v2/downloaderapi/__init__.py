@@ -23,7 +23,7 @@ class DownloaderApi(_PluginBase):
     # 插件图标
     plugin_icon = "sync_file.png"
     # 插件版本
-    plugin_version = "1.3.7"
+    plugin_version = "1.3.8"
     # 插件作者
     plugin_author = "CiaoBye"
     # 作者主页
@@ -50,7 +50,7 @@ class DownloaderApi(_PluginBase):
         self._enabled = config.get("enabled", False)
         self._save_path = config.get("save_path", None)
         self._downloader = config.get("downloader", None)
-        if not self.downloader:
+        if not self._downloader:
             self._enabled = False
             self.__update_config()
             return
@@ -235,6 +235,7 @@ class DownloaderApi(_PluginBase):
         torrent_url: str,
         site_name: str | None = None,
         site_tag: str | None = None,
+        site_cookie: str | None = None,
     ) -> tuple[str | None, int, str | None]:
         """
         通过QB添加种子并返回hash与大小
@@ -247,6 +248,7 @@ class DownloaderApi(_PluginBase):
             content=torrent_url,
             download_dir=self._get_download_dir(),
             tag=qb_tags,
+            cookie=site_cookie,
         )
         if not state:
             return None, 0, "种子添加下载失败"
@@ -269,6 +271,7 @@ class DownloaderApi(_PluginBase):
         torrent_url: str,
         site_name: str | None = None,
         site_tag: str | None = None,
+        site_cookie: str | None = None,
     ) -> tuple[str | None, int, str | None]:
         """
         通过Transmission添加种子并返回hash与大小
@@ -279,6 +282,7 @@ class DownloaderApi(_PluginBase):
             content=torrent_url,
             download_dir=self._get_download_dir(),
             labels=labels or None,
+            cookie=site_cookie,
         )
         if not torrent:
             return None, 0, "种子添加下载失败"
@@ -307,6 +311,7 @@ class DownloaderApi(_PluginBase):
         torrent_url: str,
         site_name: str | None = None,
         site_tag: str | None = None,
+        site_cookie: str | None = None,
     ) -> schemas.Response:
         """
         API调用下载种子
@@ -319,12 +324,14 @@ class DownloaderApi(_PluginBase):
                     torrent_url,
                     site_name=site_name,
                     site_tag=site_tag,
+                    site_cookie=site_cookie,
                 )
             else:
                 torrent_hash, size, error_message = await self._add_qbittorrent(
                     torrent_url,
                     site_name=site_name,
                     site_tag=site_tag,
+                    site_cookie=site_cookie,
                 )
 
             if error_message:
