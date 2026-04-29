@@ -2,6 +2,7 @@ from asyncio import to_thread
 from typing import Any
 
 from app import schemas
+from app.core.config import settings
 from app.helper.downloader import DownloaderHelper
 from app.helper.torrent import TorrentHelper
 from app.log import logger
@@ -22,7 +23,7 @@ class DownloaderApi(_PluginBase):
     # 插件图标
     plugin_icon = "sync_file.png"
     # 插件版本
-    plugin_version = "1.3.4"
+    plugin_version = "1.3.5"
     # 插件作者
     plugin_author = "yubanmeiqin9048"
     # 作者主页
@@ -162,6 +163,34 @@ class DownloaderApi(_PluginBase):
         )
 
     @staticmethod
+    def _clean_label(label: str | None) -> str | None:
+        if not label:
+            return None
+        label = str(label).strip()
+        return label or None
+
+    def _build_labels(self, site_name: str | None = None, site_tag: str | None = None) -> list[str]:
+        """
+        构建前置标签，优先使用显式 site_tag，其次使用 site_name。
+        同时补上 MP 默认下载标签，确保后续转移链路仍能识别任务。
+        """
+        labels: list[str] = []
+        base_labels = getattr(settings, "TORRENT_TAG", None)
+        if base_labels:
+            labels.extend(
+                [label.strip() for label in str(base_labels).split(",") if label and str(label).strip()]
+            )
+
+        explicit_site_tag = self._clean_label(site_tag)
+        explicit_site_name = self._clean_label(site_name)
+        if explicit_site_tag:
+            labels.append(explicit_site_tag)
+        elif explicit_site_name:
+            labels.append(explicit_site_name)
+
+        return list(dict.fromkeys(labels))
+
+    @staticmethod
     def _get_torrent_hash(torrent: Any) -> str | None:
         """
         兼容QB/TR的种子hash字段
@@ -188,23 +217,38 @@ class DownloaderApi(_PluginBase):
         )
         return int(size or 0)
 
-    async def _add_qbittorrent(self, torrent_url: str) -> tuple[str | None, int, str | None]:
+    @staticmethod
+    def _get_torrent_id(torrent: Any) -> str | int | None:
+        if torrent is None:
+            return None
+        return getattr(torrent, "id", None) or getattr(torrent, "torrent_id", None)
+
+    async def _add_qbittorrent(
+        self,
+        torrent_url: str,
+        site_name: str | None = None,
+        site_tag: str | None = None,
+    ) -> tuple[str | None, int, str | None]:
         """
         通过QB添加种子并返回hash与大小
         """
-        tag = StringUtils.generate_random_str(10)
+        track_tag = StringUtils.generate_random_str(10)
+        labels = self._build_labels(site_name=site_name, site_tag=site_tag)
+        qb_tags = ",".join([track_tag, *labels]) if labels else track_tag
         state = await to_thread(
             self.downloader.add_torrent,
             content=torrent_url,
             download_dir=self._save_path,
-            tag=tag,
+            tag=qb_tags,
         )
         if not state:
             return None, 0, "种子添加下载失败"
 
-        torrent_hash = await to_thread(self.downloader.get_torrent_id_by_tag, tag)
+        torrent_hash = await to_thread(self.downloader.get_torrent_id_by_tag, track_tag)
         if not torrent_hash:
             return None, 0, "种子添加成功，但未能定位下载任务"
+
+        await to_thread(self.downloader.remove_torrents_tag, torrent_hash, [track_tag])
 
         torrents, error = await to_thread(self.downloader.get_torrents, torrent_hash)
         if error:
@@ -213,16 +257,21 @@ class DownloaderApi(_PluginBase):
         torrent = torrents[0] if torrents else None
         return torrent_hash, self._get_torrent_size(torrent), None
 
-    async def _add_transmission(self, torrent_url: str) -> tuple[str | None, int, str | None]:
+    async def _add_transmission(
+        self,
+        torrent_url: str,
+        site_name: str | None = None,
+        site_tag: str | None = None,
+    ) -> tuple[str | None, int, str | None]:
         """
         通过Transmission添加种子并返回hash与大小
         """
-        label = StringUtils.generate_random_str(10)
+        labels = self._build_labels(site_name=site_name, site_tag=site_tag)
         torrent = await to_thread(
             self.downloader.add_torrent,
             content=torrent_url,
             download_dir=self._save_path,
-            labels=[label],
+            labels=labels or None,
         )
         if not torrent:
             return None, 0, "种子添加下载失败"
@@ -232,7 +281,8 @@ class DownloaderApi(_PluginBase):
         if torrent_hash:
             return torrent_hash, size, None
 
-        torrents, error = await to_thread(self.downloader.get_torrents, tags=label)
+        torrent_id = self._get_torrent_id(torrent)
+        torrents, error = await to_thread(self.downloader.get_torrents, ids=torrent_id) if torrent_id else ([], True)
         if error:
             return None, 0, "种子添加成功，但查询下载任务失败"
         if not torrents:
@@ -245,7 +295,12 @@ class DownloaderApi(_PluginBase):
 
         return torrent_hash, self._get_torrent_size(torrent), None
 
-    async def download_torrent(self, torrent_url: str) -> schemas.Response:
+    async def download_torrent(
+        self,
+        torrent_url: str,
+        site_name: str | None = None,
+        site_tag: str | None = None,
+    ) -> schemas.Response:
         """
         API调用下载种子
         """
@@ -253,9 +308,17 @@ class DownloaderApi(_PluginBase):
             if not self.downloader:
                 return schemas.Response(success=False, message="未配置下载器")
             if isinstance(self.downloader, Transmission):
-                torrent_hash, size, error_message = await self._add_transmission(torrent_url)
+                torrent_hash, size, error_message = await self._add_transmission(
+                    torrent_url,
+                    site_name=site_name,
+                    site_tag=site_tag,
+                )
             else:
-                torrent_hash, size, error_message = await self._add_qbittorrent(torrent_url)
+                torrent_hash, size, error_message = await self._add_qbittorrent(
+                    torrent_url,
+                    site_name=site_name,
+                    site_tag=site_tag,
+                )
 
             if error_message:
                 return schemas.Response(success=False, message=error_message)
