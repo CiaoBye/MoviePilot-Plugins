@@ -23,11 +23,11 @@ class DownloaderApi(_PluginBase):
     # 插件图标
     plugin_icon = "sync_file.png"
     # 插件版本
-    plugin_version = "1.3.6"
+    plugin_version = "1.3.7"
     # 插件作者
-    plugin_author = "yubanmeiqin9048"
+    plugin_author = "CiaoBye"
     # 作者主页
-    author_url = "https://github.com/yubanmeiqin9048"
+    author_url = "https://github.com/CiaoBye"
     # 插件配置项ID前缀
     plugin_config_prefix = "downloaderapi_"
     # 加载顺序
