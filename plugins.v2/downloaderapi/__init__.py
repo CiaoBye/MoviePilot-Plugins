@@ -23,7 +23,7 @@ class DownloaderApi(_PluginBase):
     # 插件图标
     plugin_icon = "sync_file.png"
     # 插件版本
-    plugin_version = "1.3.5"
+    plugin_version = "1.3.6"
     # 插件作者
     plugin_author = "yubanmeiqin9048"
     # 作者主页
@@ -162,6 +162,13 @@ class DownloaderApi(_PluginBase):
             }
         )
 
+    def _get_download_dir(self) -> str | None:
+        """
+        仅在配置了绝对路径时传给下载器，避免 TR 因空字符串报错
+        """
+        path = str(self._save_path).strip() if self._save_path is not None else ""
+        return path or None
+
     @staticmethod
     def _clean_label(label: str | None) -> str | None:
         if not label:
@@ -238,7 +245,7 @@ class DownloaderApi(_PluginBase):
         state = await to_thread(
             self.downloader.add_torrent,
             content=torrent_url,
-            download_dir=self._save_path,
+            download_dir=self._get_download_dir(),
             tag=qb_tags,
         )
         if not state:
@@ -270,7 +277,7 @@ class DownloaderApi(_PluginBase):
         torrent = await to_thread(
             self.downloader.add_torrent,
             content=torrent_url,
-            download_dir=self._save_path,
+            download_dir=self._get_download_dir(),
             labels=labels or None,
         )
         if not torrent:
